@@ -2,13 +2,62 @@ import React, { useEffect, useState } from 'react';
 
 const POLLING_INTERVAL = 5000;
 
-// Hardcoded addresses
 const initialAddresses = [
-  { id: '1', name: 'Farmers Market', address: '123 Coffee St, Seattle, WA 98101' },
-  { id: '2', name: 'Downtown Branch', address: '456 Brew Ave, Seattle, WA 98102' },
-  { id: '3', name: 'Westside Cafe', address: '789 Espresso Ln, Seattle, WA 98103' },
-  { id: '4', name: 'Eastside Hub', address: '101 Latte Rd, Seattle, WA 98104' },
-  { id: '5', name: 'North End', address: '321 Mocha Blvd, Seattle, WA 98105' },
+  {
+    id: '1',
+    name: 'Farmers Market',
+    address: {
+      address_line_1: '228 E Kerr St',
+      locality: 'Salisbury',
+      administrative_district_level_1: 'NC',
+      postal_code: '28144',
+      country: 'US'
+    }
+  },
+  {
+    id: '2',
+    name: 'Osprey At Lake Norman',
+    address: {
+      address_line_1: '134 Village Club Dr',
+      locality: 'Mooresville',
+      administrative_district_level_1: 'NC',
+      postal_code: '28117',
+      country: 'US'
+    }
+  },
+  {
+    id: '3',
+    name: 'Leatherman Lane',
+    address: {
+      address_line_1: '79046 Overcash Rd',
+      locality: 'Concord',
+      administrative_district_level_1: 'NC',
+      postal_code: '28027',
+      country: 'US'
+    }
+  },
+  {
+    id: '4',
+    name: 'Eastside Hub',
+    address: {
+      address_line_1: '101 Latte Rd',
+      locality: 'Seattle',
+      administrative_district_level_1: 'WA',
+      postal_code: '98104',
+      country: 'US'
+    }
+  },
+  {
+    id: '5',
+    name: 'North End',
+    address: {
+      address_line_1: '321 Mocha Blvd',
+      locality: 'Seattle',
+      administrative_district_level_1: 'WA',
+      postal_code: '98105',
+      country: 'US'
+    }
+  }
 ];
 
 const App = () => {
@@ -17,7 +66,36 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('orders');
   const [addresses, setAddresses] = useState(() => {
     const saved = localStorage.getItem('addresses');
-    return saved ? JSON.parse(saved) : initialAddresses;
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Migrate legacy string addresses to structured format
+      return parsed.map(addr => {
+        if (typeof addr.address === 'string') {
+          const parts = addr.address.split(',').map(part => part.trim());
+          if (parts.length < 3) {
+            console.warn('Invalid legacy address format:', addr.address);
+            return addr; // Skip invalid addresses or handle differently
+          }
+          const [street, city, stateZip] = parts;
+          const stateZipParts = stateZip.split(' ');
+          const state = stateZipParts[0];
+          const zip = stateZipParts[1] || '';
+          return {
+            ...addr,
+            address: {
+              address_line_1: street,
+              address_line_2: '',
+              locality: city,
+              administrative_district_level_1: state,
+              postal_code: zip,
+              country: 'US'
+            }
+          };
+        }
+        return addr;
+      });
+    }
+    return initialAddresses;
   });
   const [newAddressName, setNewAddressName] = useState('');
   const [newAddressText, setNewAddressText] = useState('');
@@ -124,10 +202,27 @@ const App = () => {
   const handleAddAddress = (e) => {
     e.preventDefault();
     if (newAddressName && newAddressText) {
+      const parts = newAddressText.split(',').map(part => part.trim());
+      if (parts.length < 3) {
+        alert('Please enter address in format: Street, City, State ZIP');
+        return;
+      }
+      const [street, city, stateZip] = parts;
+      const stateZipParts = stateZip.split(' ');
+      const state = stateZipParts[0];
+      const zip = stateZipParts[1] || '';
+
       const newAddress = {
         id: `${Date.now()}`,
         name: newAddressName,
-        address: newAddressText,
+        address: {
+          address_line_1: street,
+          address_line_2: '',
+          locality: city,
+          administrative_district_level_1: state,
+          postal_code: zip,
+          country: 'US'
+        }
       };
       setAddresses([...addresses, newAddress]);
       setNewAddressName('');
@@ -137,10 +232,12 @@ const App = () => {
 
   const handleSelectAddress = async (address) => {
     try {
-      const response = await fetch('/api/square/set-location', {
-        method: 'POST',
+      // Log the address being sent for debugging
+      console.log('Sending address to server:', address);
+      const response = await fetch('/api/locations/LQADAKKDZFZJC', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: address.address }),
+        body: JSON.stringify({ address: address.address })
       });
       if (!response.ok) throw new Error('Failed to set location in Square');
       const data = await response.json();
@@ -196,7 +293,7 @@ const App = () => {
 
       {/* Orders Tab */}
       {activeTab === 'orders' && (
-        <div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', justifyContent: 'center' }}>
           {orders && orders.length > 0 ? (
             orders.map((order) => (
               <div
@@ -282,7 +379,7 @@ const App = () => {
           </div>
 
           {/* Address List */}
-          <div style={{ marginTop: '20px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', alignItems: 'center', marginTop: '20px' }}>
             {addresses.map((address) => (
               <div
                 key={address.id}
@@ -290,7 +387,9 @@ const App = () => {
                 onClick={() => handleSelectAddress(address)}
               >
                 <h3 style={{ color: '#515151', fontSize: '18px' }}>{address.name}</h3>
-                <p style={{ color: '#727272' }}>{address.address}</p>
+                <p style={{ color: '#727272' }}>
+                  {address.address.address_line_1}, {address.address.locality}, {address.address.administrative_district_level_1} {address.address.postal_code}
+                </p>
               </div>
             ))}
           </div>
@@ -300,12 +399,12 @@ const App = () => {
   );
 };
 
-// Styles from restored.js with additional styles for new elements
+// Styles (unchanged, included for completeness)
 const styles = {
   appContainer: {
     padding: '20px',
     fontFamily: "'Raleway', sans-serif",
-    backgroundColor: 'white',
+    backgroundColor: '#fce7f3',
     minHeight: '100vh',
   },
   heading: {
@@ -324,12 +423,12 @@ const styles = {
   card: {
     width: '325px',
     background: 'white',
-    margin: '0 auto',
     boxShadow: '0 2px 5px rgba(0,0,0,0.16), 0 2px 10px rgba(0,0,0,0.12)',
     transition: 'all 0.3s',
     borderRadius: '8px',
     overflow: 'hidden',
     position: 'relative',
+    margin: '0',
   },
   nav: {
     width: '100%',
