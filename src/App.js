@@ -1,63 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { ReactComponent as LovwIcon } from './lovwteaecg.svg';
 
 const POLLING_INTERVAL = 5000;
 
 const initialAddresses = [
-  {
-    id: '1',
-    name: 'Farmers Market',
-    address: {
-      address_line_1: '228 E Kerr St',
-      locality: 'Salisbury',
-      administrative_district_level_1: 'NC',
-      postal_code: '28144',
-      country: 'US'
-    }
-  },
-  {
-    id: '2',
-    name: 'Osprey At Lake Norman',
-    address: {
-      address_line_1: '134 Village Club Dr',
-      locality: 'Mooresville',
-      administrative_district_level_1: 'NC',
-      postal_code: '28117',
-      country: 'US'
-    }
-  },
-  {
-    id: '3',
-    name: 'Leatherman Lane',
-    address: {
-      address_line_1: '79046 Overcash Rd',
-      locality: 'Concord',
-      administrative_district_level_1: 'NC',
-      postal_code: '28027',
-      country: 'US'
-    }
-  },
-  {
-    id: '4',
-    name: 'Eastside Hub',
-    address: {
-      address_line_1: '101 Latte Rd',
-      locality: 'Seattle',
-      administrative_district_level_1: 'WA',
-      postal_code: '98104',
-      country: 'US'
-    }
-  },
-  {
-    id: '5',
-    name: 'North End',
-    address: {
-      address_line_1: '321 Mocha Blvd',
-      locality: 'Seattle',
-      administrative_district_level_1: 'WA',
-      postal_code: '98105',
-      country: 'US'
-    }
-  }
+  
 ];
 
 const App = () => {
@@ -99,6 +46,7 @@ const App = () => {
   });
   const [newAddressName, setNewAddressName] = useState('');
   const [newAddressText, setNewAddressText] = useState('');
+  const [removedOrders, setRemovedOrders] = useState([]);
 
   // Save addresses to localStorage when they change
   useEffect(() => {
@@ -116,14 +64,39 @@ const App = () => {
     localStorage.setItem('clearedOrders', JSON.stringify(updatedClearedOrders));
   };
 
+  const removeClearedOrderId = (id) => {
+    const clearedOrders = getClearedOrderIds();
+    const updatedClearedOrders = clearedOrders.filter((orderId) => orderId !== id);
+    localStorage.setItem('clearedOrders', JSON.stringify(updatedClearedOrders));
+  };
+
+  const undoLastRemoval = () => {
+    if (removedOrders.length === 0) return;
+    const [lastRemoved, ...remainingRemoved] = removedOrders;
+    removeClearedOrderId(lastRemoved.id);
+    setOrders((prevOrders) => [lastRemoved, ...prevOrders]);
+    setRemovedOrders(remainingRemoved);
+  };
+
   useEffect(() => {
     const fetchOrders = async () => {
       try {
         const response = await fetch('/api/orders');
         if (!response.ok) throw new Error('Failed to fetch orders');
         const data = await response.json();
+        console.log('Raw API orders count:', data.length);
+        console.log('Raw API orders:', data.map(o => ({ id: o.id, state: o.state, source: o.source?.name })));
+        
         const clearedOrderIds = getClearedOrderIds();
-        const filteredOrders = data.filter((order) => !clearedOrderIds.includes(order.id));
+        console.log('Cleared order IDs:', clearedOrderIds);
+        
+        const filteredOrders = data.filter((order) => {
+          const isCleared = clearedOrderIds.includes(order.id);
+          const isCompletedOrOpen =  order.state === 'COMPLETED' ||   order.state === 'OPEN';
+    
+          return !isCleared && isCompletedOrOpen;
+        });
+        console.log('Filtered orders after clearing:', filteredOrders.length);
         setOrders(filteredOrders);
       } catch (err) {
         console.error('Error fetching orders:', err);
@@ -166,7 +139,9 @@ const App = () => {
         requestAnimationFrame(animate);
       } else {
         if (displacement) displacement.setAttribute('scale', 0);
-        element.remove();
+        // Do not manually remove the DOM node here.
+        // React will remove it when the order is removed from state.
+        element.style.opacity = '0';
       }
     };
 
@@ -174,13 +149,26 @@ const App = () => {
   };
 
   const handleDoubleClick = (id) => {
+    const orderToRemove = orders.find((order) => order.id === id);
+    if (!orderToRemove) return;
+
     const element = document.querySelector(`[data-order-id="${id}"]`);
     if (element) {
-      applyThanosSnap(element);
-      setTimeout(() => {
+      try {
+        applyThanosSnap(element);
+
+        setTimeout(() => {
+          addClearedOrderId(id);
+          setOrders((prevOrders) => prevOrders.filter((order) => order.id !== id));
+          setRemovedOrders((prevRemoved) => [orderToRemove, ...prevRemoved]);
+        }, 1000);
+      } catch (error) {
+        console.error('Error during order removal animation:', error);
+        // Fallback: just remove without animation
         addClearedOrderId(id);
         setOrders((prevOrders) => prevOrders.filter((order) => order.id !== id));
-      }, 1000);
+        setRemovedOrders((prevRemoved) => [orderToRemove, ...prevRemoved]);
+      }
     }
   };
 
@@ -188,15 +176,41 @@ const App = () => {
 
   const formatDate = (timestamp) => {
     const date = new Date(timestamp);
-    const options = { month: 'short' };
-    const month = date.toLocaleString(undefined, options);
-    const day = date.getDate();
     const hours = date.getHours();
     const minutes = date.getMinutes();
     const ampm = hours >= 12 ? 'PM' : 'AM';
     const formattedHours = hours % 12 || 12;
     const formattedMinutes = minutes < 10 ? `0${minutes}` : minutes;
-    return `${month} ${day} ${formattedHours}:${formattedMinutes} ${ampm}`;
+    return `${formattedHours}:${formattedMinutes} ${ampm}`;
+  };
+
+  const isWebOrder = (order) => {
+    return !!order?.source?.name?.toLowerCase().includes('online');
+  };
+
+  const getOrderName = (order) => {
+    if (!order || !isWebOrder(order)) return null;
+
+    const recipientName = order.fulfillments?.flatMap((fulfillment) => {
+      const recipient = fulfillment?.pickupDetails?.recipient || fulfillment?.shipmentDetails?.recipient;
+      if (!recipient) return [];
+      return recipient.displayName ? [recipient.displayName] : [];
+    })?.[0];
+
+    if (recipientName) return recipientName;
+
+    return order.customerId || null;
+  };
+
+  const getPrimaryModifier = (item) => {
+    if (!item.modifiers || item.modifiers.length === 0) return null;
+    const sizeModifier = item.modifiers.find((mod) => ['Regular', 'Large'].includes(mod.name));
+    return sizeModifier ? sizeModifier.name : null;
+  };
+
+  const getAdditionalModifiers = (item) => {
+    if (!item.modifiers || item.modifiers.length === 0) return [];
+    return item.modifiers.filter((mod) => !['Regular', 'Large'].includes(mod.name));
   };
 
   const handleAddAddress = (e) => {
@@ -240,7 +254,7 @@ const App = () => {
         body: JSON.stringify({ address: address.address })
       });
       if (!response.ok) throw new Error('Failed to set location in Square');
-      const data = await response.json();
+      await response.json();
       alert(`Location set to ${address.name}`);
     } catch (err) {
       console.error('Error setting Square location:', err);
@@ -267,6 +281,15 @@ const App = () => {
           Addresses
         </button>
       </div>
+
+      {/* Undo Button */}
+      {removedOrders.length > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
+          <button style={styles.undoTopButton} onClick={undoLastRemoval}>
+            Undo Last Removal ({removedOrders.length})
+          </button>
+        </div>
+      )}
 
       {/* SVG Filter */}
       <svg style={{ display: 'none' }}>
@@ -304,41 +327,40 @@ const App = () => {
               >
                 <nav style={styles.nav}>
                   <div style={styles.navContent}>
-                    {order.source?.sourceType === 'ONLINE' ? (
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="24"
-                        height="24"
-                        fill="currentColor"
-                        viewBox="0 0 16 16"
-                        style={styles.heartIcon}
-                      >
-                        <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0M2.04 4.326c.325 1.329 2.532 2.54 3.717 3.19.48.263.793.434.743.484q-.121.12-.242.234c-.416.396-.787.749-.758 1.266.035.634.618.824 1.214 1.017.577.188 1.168.38 1.286.983.082.417-.075.988-.22 1.52-.215.782-.406 1.48.22 1.48 1.5-.5 3.798-3.186 4-5 .138-1.243-2-2-3.5-2.5-.478-.16-.755.081-.99.284-.172.15-.322.279-.51.216-.445-.148-2.5-2-1.5-2.5.78-.39.952-.171 1.227.182.078.099.163.208.273.318.609.304.662-.132.723-.633.039-.322.081-.671.277-.867.434-.434 1.265-.791 2.028-1.12.712-.306 1.365-.587 1.579-.88A7 7 0 1 1 2.04 4.327Z" />
-                      </svg>
-                    ) : (
-                      <svg
-                        viewBox="0 0 512 512"
-                        width="24"
-                        xmlns="http://www.w3.org/2000/svg"
-                        style={styles.heartIcon}
-                      >
-                        <path d="M340.8,98.4c50.7,0,91.9,41.3,91.9,92.3c0,26.2-10.9,49.8-28.3,66.6L256,407.1L105,254.6c-15.8-16.6-25.6-39.1-25.6-63.9 c0-51,41.1-92.3,91.9-92.3c38.2,0,70.9,23.4,84.8,56.8C269.8,121.9,302.6,98.4,340.8,98.4 M340.8,83C307,83,276,98.8,256,124.8 c-20-26-51-41.8-84.8-41.8C112.1,83,64,131.3,64,190.7c0,27.9,10.6,54.4,29.9,74.6L245.1,418l10.9,11l10.9-11l148.3-149.8 c21-20.3,32.8-47.9,32.8-77.5C448,131.3,399.9,83,340.8,83L340.8,83z" />
-                      </svg>
-                    )}
+                    <div style={styles.heartIconWrap}>
+                      <LovwIcon style={styles.heartIcon} />
+                    </div>
                   </div>
                   <span style={styles.orderDateNav}>{formatDate(order.createdAt)}</span>
                 </nav>
+                {getOrderName(order) && (
+                  <div style={styles.customerNameBox}>
+                    <span style={styles.customerNameText}>{getOrderName(order)}</span>
+                  </div>
+                )}
                 <div style={styles.description}>
-                  {order.lineItems.map((item, index) => (
-                    <div key={index} style={styles.lineItem}>
-                      <h2 style={styles.orderTitle}>
-                        {item.name} <strong>({item.quantity})</strong>
-                      </h2>
-                      {item.variationName && (
-                        <h4 style={styles.variationName}>{item.variationName}</h4>
-                      )}
-                    </div>
-                  ))}
+                  {order.lineItems.map((item, index) => {
+                    const primaryModifier = getPrimaryModifier(item);
+                    const additionalModifiers = getAdditionalModifiers(item);
+                    return (
+                      <div key={index} style={styles.lineItem}>
+                        <h2 style={styles.orderTitle}>
+                          {item.name} <strong>({item.quantity})</strong>
+                        </h2>
+                        {primaryModifier && (
+                          <h4 style={styles.variationName}>{primaryModifier}</h4>
+                        )}
+                        {(primaryModifier && additionalModifiers.length > 0) || (!primaryModifier && item.modifiers && item.modifiers.length > 0) || item.note ? (
+                          <div style={styles.modifiers}>
+                            {(primaryModifier ? additionalModifiers : item.modifiers).map((mod, idx) => (
+                              <p key={idx} style={styles.modifier}>{mod.name}</p>
+                            ))}
+                            {item.note && <p style={styles.note}>{item.note}</p>}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                   <h1 style={styles.orderTotal}>
                     Total: {formatCurrency(order.totalMoney?.amount)}
                   </h1>
@@ -431,8 +453,8 @@ const styles = {
     margin: '0',
   },
   nav: {
-    width: '100%',
-    padding: '20px',
+    width: '98%',
+    padding: '5px',
     borderBottom: '2px solid pink',
     color: '#727272',
     textTransform: 'uppercase',
@@ -444,12 +466,45 @@ const styles = {
   navContent: {
     display: 'flex',
     alignItems: 'center',
+    paddingLeft: '36px',
     gap: '10px',
+  },
+  orderCustomer: {
+    fontSize: '14px',
+    fontWeight: '700',
+    color: '#515151',
+    textTransform: 'none',
+  },
+  customerNameBox: {
+    backgroundColor: '#fce7f3',
+    borderRadius: '20px',
+    padding: '8px 16px',
+    margin: '10px 20px',
+    display: 'inline-block',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+  },
+  customerNameText: {
+    fontSize: '16px',
+    fontWeight: '500',
+    color: 'rgb(44,62,80)',
+    textTransform: 'none',
   },
   heartIcon: {
     height: '24px',
     width: '24px',
+    transform: 'scale(3.83)',
+    transformOrigin: 'center',
+    display: 'block',
     cursor: 'pointer',
+  },
+  heartIconWrap: {
+    height: '24px',
+    width: '24px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    overflow: 'visible',
   },
   orderDateNav: {
     fontSize: '14px',
@@ -472,6 +527,24 @@ const styles = {
     fontSize: '16px',
     margin: '2px 0',
   },
+  modifiers: {
+    marginTop: '4px',
+    paddingLeft: '10px',
+  },
+  modifier: {
+    color: '#ff79a8',
+    fontSize: '14px',
+    margin: '2px 0',
+    fontWeight: '700',
+    fontStyle: 'italic',
+  },
+  note: {
+    color: '#ff79a8',
+    fontSize: '14px',
+    margin: '2px 0',
+    fontWeight: '700',
+    fontStyle: 'italic',
+  },
   lineItem: {
     marginBottom: '10px',
   },
@@ -480,6 +553,7 @@ const styles = {
     fontWeight: '500',
     fontSize: '20px',
     margin: '10px 0',
+    textAlign: 'right',
   },
   activeTab: {
     backgroundColor: 'white',
@@ -515,6 +589,16 @@ const styles = {
     border: 'none',
     borderRadius: '4px',
     cursor: 'pointer',
+  },
+  undoTopButton: {
+    padding: '12px 20px',
+    backgroundColor: '#a8c4a0',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: '600',
+    fontSize: '16px',
   },
 };
 
