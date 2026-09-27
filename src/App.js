@@ -497,7 +497,7 @@ const App = () => {
       </div>
 
       {activeTab === 'trade' && (
-        <div style={{ margin: '0 -20px -20px' }}>
+        <div style={{ marginBottom: '-20px' }}>
           <OrderDetails />
         </div>
       )}

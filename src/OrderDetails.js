@@ -55,9 +55,10 @@ const formFields = [
 
 const styles = {
   wrapper: {
-    width: '100%',
-    maxWidth: '100%',
-    margin: '0',
+    width: '100vw',
+    maxWidth: '100vw',
+    marginLeft: 'calc(50% - 50vw)',
+    borderRadius: 0,
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     background: '#fff',
     minHeight: '100vh',
@@ -123,10 +124,12 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '14px 12px'
+    padding: '12px',
+    gap: '8px',
+    minWidth: 0
   },
-  bidAskLabel: { fontSize: '16px', color: '#333' },
-  bidAskValue: { fontSize: '18px', fontWeight: 700, color: '#222' },
+  bidAskLabel: { fontSize: '14px', color: '#333', whiteSpace: 'nowrap' },
+  bidAskValue: { fontSize: '14px', fontWeight: 700, color: '#222', whiteSpace: 'nowrap' },
   divider: { width: '1px', background: '#e5e5e5' },
   detailRow: {
     display: 'flex',
