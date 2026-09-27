@@ -1,7 +1,27 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ReactComponent as LovwIcon } from './lovwteaecg.svg';
+import OrderDetails from './OrderDetails';
 
 const POLLING_INTERVAL = 5000;
+const COST_LOOKBACK_MONTHS = 2;
+const COST_TAB_PASSWORD = '259333';
+
+const getOrderTimestamp = (order) => {
+  return order?.closedAt || order?.createdAt || order?.updatedAt || null;
+};
+
+const isCompletedInLookbackWindow = (order, monthsBack) => {
+  if (order?.state !== 'COMPLETED') return false;
+  const timestamp = getOrderTimestamp(order);
+  if (!timestamp) return false;
+
+  const orderDate = new Date(timestamp);
+  if (Number.isNaN(orderDate.getTime())) return false;
+
+  const earliestDate = new Date();
+  earliestDate.setMonth(earliestDate.getMonth() - monthsBack);
+  return orderDate >= earliestDate;
+};
 
 const initialAddresses = [
   
@@ -47,11 +67,31 @@ const App = () => {
   const [newAddressName, setNewAddressName] = useState('');
   const [newAddressText, setNewAddressText] = useState('');
   const [removedOrders, setRemovedOrders] = useState([]);
+  const [costOrders, setCostOrders] = useState([]);
+  const [isLoadingCostOrders, setIsLoadingCostOrders] = useState(false);
+  const [costOrdersLoaded, setCostOrdersLoaded] = useState(false);
+  const [costTabError, setCostTabError] = useState(null);
+  const [costTabUnlocked, setCostTabUnlocked] = useState(false);
+  const [costTabPasswordInput, setCostTabPasswordInput] = useState('');
+  const [showCostPasswordModal, setShowCostPasswordModal] = useState(false);
+  const [costMap, setCostMap] = useState(() => {
+    const saved = localStorage.getItem('costMap');
+    if (!saved) return {};
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return {};
+    }
+  });
 
   // Save addresses to localStorage when they change
   useEffect(() => {
     localStorage.setItem('addresses', JSON.stringify(addresses));
   }, [addresses]);
+
+  useEffect(() => {
+    localStorage.setItem('costMap', JSON.stringify(costMap));
+  }, [costMap]);
 
   const getClearedOrderIds = () => {
     const clearedOrders = localStorage.getItem('clearedOrders');
@@ -213,6 +253,168 @@ const App = () => {
     return item.modifiers.filter((mod) => !['Regular', 'Large'].includes(mod.name));
   };
 
+  const fetchCompletedOrdersForCosting = useCallback(async () => {
+    setIsLoadingCostOrders(true);
+    setCostTabError(null);
+
+    try {
+      const response = await fetch('/api/orders');
+      if (!response.ok) throw new Error('Failed to fetch completed orders');
+
+      const data = await response.json();
+      const filteredOrders = data
+        .filter((order) => isCompletedInLookbackWindow(order, COST_LOOKBACK_MONTHS))
+        .sort((a, b) => {
+          const dateA = new Date(getOrderTimestamp(a) || 0).getTime();
+          const dateB = new Date(getOrderTimestamp(b) || 0).getTime();
+          return dateB - dateA;
+        });
+
+      setCostOrders(filteredOrders);
+      setCostOrdersLoaded(true);
+    } catch (err) {
+      console.error('Error fetching completed cost orders:', err);
+      setCostTabError(err.message);
+    } finally {
+      setIsLoadingCostOrders(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'costs' && !costOrdersLoaded) {
+      fetchCompletedOrdersForCosting();
+    }
+  }, [activeTab, costOrdersLoaded, fetchCompletedOrdersForCosting]);
+
+  const costReferenceData = useMemo(() => {
+    const lineItemCountMap = new Map();
+    const modifierCountMap = new Map();
+    const noteCountMap = new Map();
+
+    costOrders.forEach((order) => {
+      (order.lineItems || []).forEach((item) => {
+        const itemName = (item.name || '').trim();
+        const quantity = Number(item.quantity) || 1;
+
+        if (itemName) {
+          lineItemCountMap.set(itemName, (lineItemCountMap.get(itemName) || 0) + quantity);
+        }
+
+        (item.modifiers || []).forEach((mod) => {
+          const name = (mod?.name || '').trim();
+          if (!name) return;
+          modifierCountMap.set(name, (modifierCountMap.get(name) || 0) + quantity);
+        });
+
+        const noteText = (item.note || '').trim();
+        if (noteText) {
+          noteCountMap.set(noteText, (noteCountMap.get(noteText) || 0) + quantity);
+        }
+      });
+    });
+
+    const lineItems = Array.from(lineItemCountMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    const modifiers = Array.from(modifierCountMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    const notes = Array.from(noteCountMap.entries())
+      .map(([text, count]) => ({ text, count }))
+      .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text));
+
+    return { lineItems, modifiers, notes };
+  }, [costOrders]);
+
+  const getCostKey = (type, value) => `${type}::${value}`;
+
+  const handleCostInputChange = (key, value) => {
+    const sanitized = value.replace(/[^0-9.]/g, '');
+    setCostMap((prev) => ({ ...prev, [key]: sanitized }));
+  };
+
+  const getNumericCost = (key) => {
+    const parsed = Number(costMap[key]);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const formatDollars = (amount) => {
+    return `$${amount.toFixed(2)}`;
+  };
+
+  const getEstimatedOrderCost = (order) => {
+    let totalCost = 0;
+
+    (order.lineItems || []).forEach((item) => {
+      const itemName = (item.name || '').trim();
+      const quantity = Number(item.quantity) || 1;
+
+      if (itemName) {
+        totalCost += quantity * getNumericCost(getCostKey('lineItem', itemName));
+      }
+
+      (item.modifiers || []).forEach((mod) => {
+        const name = (mod?.name || '').trim();
+        if (!name) return;
+        totalCost += quantity * getNumericCost(getCostKey('modifier', name));
+      });
+
+      const noteText = (item.note || '').trim();
+      if (noteText) {
+        totalCost += quantity * getNumericCost(getCostKey('note', noteText));
+      }
+    });
+
+    return totalCost;
+  };
+
+  const getEstimatedItemCost = (item) => {
+    let itemCost = 0;
+    const itemName = (item.name || '').trim();
+    const quantity = Number(item.quantity) || 1;
+
+    if (itemName) {
+      itemCost += quantity * getNumericCost(getCostKey('lineItem', itemName));
+    }
+
+    (item.modifiers || []).forEach((mod) => {
+      const name = (mod?.name || '').trim();
+      if (!name) return;
+      itemCost += quantity * getNumericCost(getCostKey('modifier', name));
+    });
+
+    const noteText = (item.note || '').trim();
+    if (noteText) {
+      itemCost += quantity * getNumericCost(getCostKey('note', noteText));
+    }
+
+    return itemCost;
+  };
+
+  const handleCostTabClick = () => {
+    if (!costTabUnlocked) {
+      // Show password modal when trying to access locked tab
+      setShowCostPasswordModal(true);
+      return;
+    }
+    setActiveTab('costs');
+  };
+
+  const handleCostPasswordSubmit = (e) => {
+    e.preventDefault();
+    if (costTabPasswordInput === COST_TAB_PASSWORD) {
+      setCostTabUnlocked(true);
+      setCostTabPasswordInput('');
+      setShowCostPasswordModal(false);
+      setActiveTab('costs');
+    } else {
+      alert('Incorrect passcode. Please try again.');
+      setCostTabPasswordInput('');
+    }
+  };
+
   const handleAddAddress = (e) => {
     e.preventDefault();
     if (newAddressName && newAddressText) {
@@ -280,7 +482,25 @@ const App = () => {
         >
           Addresses
         </button>
+        <button
+          style={activeTab === 'costs' ? styles.activeTab : styles.inactiveTab}
+          onClick={handleCostTabClick}
+        >
+          Cost Builder
+        </button>
+        <button
+          style={activeTab === 'trade' ? styles.activeTab : styles.inactiveTab}
+          onClick={() => setActiveTab('trade')}
+        >
+          Order Details
+        </button>
       </div>
+
+      {activeTab === 'trade' && (
+        <div style={{ margin: '0 -20px -20px' }}>
+          <OrderDetails />
+        </div>
+      )}
 
       {/* Undo Button */}
       {removedOrders.length > 0 && (
@@ -339,9 +559,10 @@ const App = () => {
                   </div>
                 )}
                 <div style={styles.description}>
-                  {order.lineItems.map((item, index) => {
+                  {(order.lineItems || []).map((item, index) => {
                     const primaryModifier = getPrimaryModifier(item);
                     const additionalModifiers = getAdditionalModifiers(item);
+                    const visibleModifiers = primaryModifier ? additionalModifiers : (item.modifiers || []);
                     return (
                       <div key={index} style={styles.lineItem}>
                         <h2 style={styles.orderTitle}>
@@ -352,7 +573,7 @@ const App = () => {
                         )}
                         {(primaryModifier && additionalModifiers.length > 0) || (!primaryModifier && item.modifiers && item.modifiers.length > 0) || item.note ? (
                           <div style={styles.modifiers}>
-                            {(primaryModifier ? additionalModifiers : item.modifiers).map((mod, idx) => (
+                            {visibleModifiers.map((mod, idx) => (
                               <p key={idx} style={styles.modifier}>{mod.name}</p>
                             ))}
                             {item.note && <p style={styles.note}>{item.note}</p>}
@@ -417,6 +638,225 @@ const App = () => {
           </div>
         </div>
       )}
+
+      {/* Cost Tab Password Modal */}
+      {showCostPasswordModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modalContent}>
+            <h2 style={styles.modalHeading}>Enter Passcode</h2>
+            <p style={styles.modalSubtext}>This feature is password protected.</p>
+            <form onSubmit={handleCostPasswordSubmit} style={styles.passwordForm}>
+              <input
+                type="password"
+                placeholder="Enter passcode"
+                value={costTabPasswordInput}
+                onChange={(e) => setCostTabPasswordInput(e.target.value)}
+                style={styles.passwordInput}
+                autoFocus
+              />
+              <button type="submit" style={styles.passwordButton}>
+                Unlock
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Cost Builder Tab */}
+      {activeTab === 'costs' && costTabUnlocked && (
+        <div style={styles.costBuilderContainer}>
+          <div style={styles.costToolbar}>
+            <div>
+              <h2 style={styles.costHeading}>Completed Orders (Last {COST_LOOKBACK_MONTHS} Months)</h2>
+              <p style={styles.costSubHeading}>Build your make-cost list from unique modifiers and notes.</p>
+            </div>
+            <button
+              type="button"
+              style={styles.refreshButton}
+              onClick={fetchCompletedOrdersForCosting}
+              disabled={isLoadingCostOrders}
+            >
+              {isLoadingCostOrders ? 'Loading...' : 'Refresh Orders'}
+            </button>
+          </div>
+
+          {costTabError && <p style={styles.errorText}>{costTabError}</p>}
+
+          <div style={styles.costSummaryGrid}>
+            <div style={styles.summaryCard}>
+              <strong>{costOrders.length}</strong>
+              <span>Completed Orders</span>
+            </div>
+            <div style={styles.summaryCard}>
+              <strong>{costReferenceData.lineItems.length}</strong>
+              <span>Unique Line Items</span>
+            </div>
+            <div style={styles.summaryCard}>
+              <strong>{costReferenceData.modifiers.length}</strong>
+              <span>Unique Modifiers</span>
+            </div>
+            <div style={styles.summaryCard}>
+              <strong>{costReferenceData.notes.length}</strong>
+              <span>Unique Notes</span>
+            </div>
+          </div>
+
+          <div style={styles.costColumns}>
+            <div style={styles.costColumn}>
+              <h3 style={styles.costColumnHeading}>Line Item Costs</h3>
+              {costReferenceData.lineItems.length === 0 ? (
+                <p style={styles.noOrdersText}>No line items found in this date range.</p>
+              ) : (
+                costReferenceData.lineItems.map((lineItem) => {
+                  const key = getCostKey('lineItem', lineItem.name);
+                  return (
+                    <div key={key} style={styles.costRow}>
+                      <div style={styles.costLabelBlock}>
+                        <span style={styles.costLabel}>{lineItem.name}</span>
+                        <span style={styles.costCount}>Used {lineItem.count}x</span>
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={costMap[key] || ''}
+                        onChange={(event) => handleCostInputChange(key, event.target.value)}
+                        style={styles.costInput}
+                      />
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={styles.costColumn}>
+              <h3 style={styles.costColumnHeading}>Modifier Costs</h3>
+              {costReferenceData.modifiers.length === 0 ? (
+                <p style={styles.noOrdersText}>No modifiers found in this date range.</p>
+              ) : (
+                costReferenceData.modifiers.map((modifier) => {
+                  const key = getCostKey('modifier', modifier.name);
+                  return (
+                    <div key={key} style={styles.costRow}>
+                      <div style={styles.costLabelBlock}>
+                        <span style={styles.costLabel}>{modifier.name}</span>
+                        <span style={styles.costCount}>Used {modifier.count}x</span>
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={costMap[key] || ''}
+                        onChange={(event) => handleCostInputChange(key, event.target.value)}
+                        style={styles.costInput}
+                      />
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={styles.costColumn}>
+              <h3 style={styles.costColumnHeading}>Note Costs</h3>
+              {costReferenceData.notes.length === 0 ? (
+                <p style={styles.noOrdersText}>No notes found in this date range.</p>
+              ) : (
+                costReferenceData.notes.map((note) => {
+                  const key = getCostKey('note', note.text);
+                  return (
+                    <div key={key} style={styles.costRow}>
+                      <div style={styles.costLabelBlock}>
+                        <span style={styles.costLabel}>{note.text}</span>
+                        <span style={styles.costCount}>Used {note.count}x</span>
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={costMap[key] || ''}
+                        onChange={(event) => handleCostInputChange(key, event.target.value)}
+                        style={styles.costInput}
+                      />
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h3 style={{ ...styles.costColumnHeading, marginBottom: '16px' }}>Order Cost Estimates</h3>
+            {costOrders.length === 0 ? (
+              <p style={styles.noOrdersText}>No completed orders found in the last {COST_LOOKBACK_MONTHS} months.</p>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', justifyContent: 'center' }}>
+                {costOrders.map((order) => {
+                  const estimatedCost = getEstimatedOrderCost(order);
+                  const saleTotal = Number(order?.totalMoney?.amount || 0) / 100;
+                  const margin = saleTotal - estimatedCost;
+
+                  return (
+                    <div key={order.id} style={styles.card}>
+                      <nav style={styles.nav}>
+                        <div style={styles.navContent}>
+                          <div style={styles.heartIconWrap}>
+                            <LovwIcon style={styles.heartIcon} />
+                          </div>
+                        </div>
+                        <span style={styles.orderDateNav}>
+                          {new Date(getOrderTimestamp(order)).toLocaleDateString()}
+                        </span>
+                      </nav>
+                      {getOrderName(order) && (
+                        <div style={styles.customerNameBox}>
+                          <span style={styles.customerNameText}>{getOrderName(order)}</span>
+                        </div>
+                      )}
+                      <div style={styles.description}>
+                        {(order.lineItems || []).map((item, index) => {
+                          const primaryModifier = getPrimaryModifier(item);
+                          const additionalModifiers = getAdditionalModifiers(item);
+                          const visibleModifiers = primaryModifier ? additionalModifiers : (item.modifiers || []);
+                          const itemEstimatedCost = getEstimatedItemCost(item);
+                          return (
+                            <div key={index} style={styles.lineItem}>
+                              <h2 style={styles.orderTitle}>
+                                {item.name} <strong>({item.quantity})</strong>
+                              </h2>
+                              {primaryModifier && (
+                                <h4 style={styles.variationName}>{primaryModifier}</h4>
+                              )}
+                              {((primaryModifier && additionalModifiers.length > 0) || (!primaryModifier && item.modifiers && item.modifiers.length > 0) || item.note) ? (
+                                <div style={styles.modifiers}>
+                                  {visibleModifiers.map((mod, idx) => (
+                                    <p key={idx} style={styles.modifier}>{mod.name}</p>
+                                  ))}
+                                  {item.note && <p style={styles.note}>{item.note}</p>}
+                                </div>
+                              ) : null}
+                              {itemEstimatedCost > 0 && (
+                                <div style={styles.itemCostLine}>
+                                  <span style={styles.itemCostLabel}>Item cost: {formatDollars(itemEstimatedCost)}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        <div style={styles.costTotalsRow}>
+                          <span style={styles.orderTotal}>Total: {formatDollars(saleTotal)}</span>
+                          <span style={{ ...styles.orderTotal, color: margin >= 0 ? '#2f855a' : '#c53030' }}>
+                            Est. Cost: {formatDollars(estimatedCost)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -426,7 +866,7 @@ const styles = {
   appContainer: {
     padding: '20px',
     fontFamily: "'Raleway', sans-serif",
-    backgroundColor: '#fce7f3',
+    backgroundColor: '#ffffff',
     minHeight: '100vh',
   },
   heading: {
@@ -599,6 +1039,173 @@ const styles = {
     cursor: 'pointer',
     fontWeight: '600',
     fontSize: '16px',
+  },
+  costBuilderContainer: {
+    maxWidth: '1100px',
+    margin: '0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '18px',
+  },
+  costToolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  costHeading: {
+    margin: 0,
+    color: '#515151',
+    fontSize: '24px',
+  },
+  costSubHeading: {
+    margin: '6px 0 0',
+    color: '#727272',
+  },
+  refreshButton: {
+    padding: '10px 14px',
+    border: 'none',
+    borderRadius: '8px',
+    backgroundColor: '#d14f69',
+    color: '#fff',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  costSummaryGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gap: '12px',
+  },
+  summaryCard: {
+    backgroundColor: '#fff',
+    borderRadius: '8px',
+    padding: '12px 14px',
+    boxShadow: '0 2px 6px rgba(0, 0, 0, 0.1)',
+    display: 'flex',
+    flexDirection: 'column',
+    color: '#515151',
+    gap: '4px',
+  },
+  costColumns: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+    gap: '16px',
+    alignItems: 'start',
+  },
+  costColumn: {
+    backgroundColor: '#fff',
+    borderRadius: '8px',
+    boxShadow: '0 2px 6px rgba(0, 0, 0, 0.1)',
+    padding: '16px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  costColumnHeading: {
+    margin: 0,
+    color: '#515151',
+  },
+  costRow: {
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  costLabelBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    minWidth: 0,
+    flex: 1,
+  },
+  costLabel: {
+    fontSize: '14px',
+    color: '#404040',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  costCount: {
+    fontSize: '12px',
+    color: '#7b7b7b',
+  },
+  costInput: {
+    width: '88px',
+    border: '1px solid #ccc',
+    borderRadius: '6px',
+    padding: '8px',
+    textAlign: 'right',
+  },
+  costTotalsRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: '10px',
+    flexWrap: 'wrap',
+    borderTop: '1px solid #f9d4e0',
+    paddingTop: '8px',
+    marginTop: '6px',
+  },
+  itemCostLine: {
+    marginTop: '4px',
+    paddingTop: '4px',
+    borderTop: '1px solid #f0e0e5',
+  },
+  itemCostLabel: {
+    fontSize: '12px',
+    color: '#8b5a6b',
+    fontStyle: 'italic',
+  },
+  modalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  modalContent: {
+    backgroundColor: '#fff',
+    borderRadius: '12px',
+    padding: '32px',
+    boxShadow: '0 8px 24px rgba(0, 0, 0, 0.2)',
+    maxWidth: '360px',
+    width: '90%',
+  },
+  modalHeading: {
+    margin: '0 0 8px',
+    color: '#515151',
+    fontSize: '24px',
+    fontWeight: '600',
+  },
+  modalSubtext: {
+    margin: '0 0 20px',
+    color: '#727272',
+    fontSize: '14px',
+  },
+  passwordForm: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  passwordInput: {
+    padding: '10px 12px',
+    border: '1px solid #d0d0d0',
+    borderRadius: '8px',
+    fontSize: '16px',
+  },
+  passwordButton: {
+    padding: '10px 16px',
+    backgroundColor: '#d14f69',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '16px',
+    fontWeight: '600',
+    cursor: 'pointer',
   },
 };
 
